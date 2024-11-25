@@ -1,8 +1,9 @@
 package vserver
 
 import (
-	"fmt"
+	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 )
@@ -10,37 +11,68 @@ import (
 type Middleware = func(http.Handler) http.Handler
 
 type Server struct {
-	port        string
-	mux         *http.ServeMux
-	middlewares []Middleware // The order of middlewares are important
+	// mux         *http.ServeMux
+	server     *http.Server
+	middleware []Middleware
+	// options     *ServerOptions
 }
 
-func New(port string) *Server {
+type ServerOptions struct {
+	// defaults to ":8080"
+	Addr string
+
+	// defaults to context.Background
+	BaseCtx context.Context
+}
+
+// fill in the missing options
+func (so *ServerOptions) addOptionDefaults() {
+	if so.BaseCtx == nil {
+		so.BaseCtx = context.Background()
+	}
+
+	if so.Addr == "" {
+		so.Addr = ":8080"
+	}
+}
+
+func New(options *ServerOptions) *Server {
 	mux := http.NewServeMux()
 
-	return &Server{
-		port: port,
-		mux:  mux,
+	options.addOptionDefaults()
+
+	server := &http.Server{
+		Addr: options.Addr,
+		BaseContext: func(l net.Listener) context.Context {
+			return options.BaseCtx
+		},
+		Handler: mux,
 	}
+
+	return &Server{server, []Middleware{}}
 }
 
 func (s *Server) Serve() error {
-	serveMux := http.Handler(s.mux)
-
-	for _, middleware := range slices.Backward(s.middlewares) {
-		serveMux = middleware(serveMux)
+	// apply middleware to server handler
+	for _, middleware := range slices.Backward(s.middleware) {
+		s.server.Handler = middleware(s.server.Handler)
 	}
 
-	addr := fmt.Sprintf(":%s", s.port)
-	slog.Info("Listening on " + addr)
+	slog.Info("Listening on " + s.server.Addr)
 
-	return http.ListenAndServe(addr, serveMux)
+	return s.server.ListenAndServe()
+}
+
+// Allows for graceful shutdown of the server. See http package for more details
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.server.Shutdown(ctx)
 }
 
 func (s *Server) AddRoute(route string, handler http.Handler) {
-	s.mux.Handle(route, handler)
+	// assert type as we know what the handler type is
+	s.server.Handler.(*http.ServeMux).Handle(route, handler)
 }
 
 func (s *Server) AddMiddleware(middleware Middleware) {
-	s.middlewares = append(s.middlewares, middleware)
+	s.server.Handler = middleware(s.server.Handler)
 }
